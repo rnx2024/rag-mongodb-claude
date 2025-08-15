@@ -19,7 +19,7 @@ MONGO_DB = st.secrets.get("MONGO_DB") or "rag"
 MONGO_APPNAME = st.secrets.get("MONGO_APPNAME") or "Cluster0"
 MONGO_AUTH_SOURCE = st.secrets.get("MONGO_AUTH_SOURCE")  # optional, e.g. "admin"
 
-# Claude (kept; remove if you don't want LLM responses)
+# Claude
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY")
 
 DB_NAME, DOCS_COLL, CHAT_COLL = MONGO_DB, "docs", "chat"
@@ -35,7 +35,6 @@ def _build_mongo_uri() -> Optional[str]:
         pwd = quote_plus(MONGO_PASSWORD)
         base = f"mongodb+srv://{user}:{pwd}@{MONGO_HOST}"
         qs = f"retryWrites=true&w=majority&appName={MONGO_APPNAME}"
-        # Default to admin authSource unless explicitly set
         auth_src = quote_plus(MONGO_AUTH_SOURCE or "admin")
         if MONGO_DB:
             return f"{base}/{MONGO_DB}?{qs}&authSource={auth_src}"
@@ -63,11 +62,11 @@ def get_clients():
             socketTimeoutMS=15000,
             appname="seo-coach",
         )
-        mc.admin.command("ping")              # network
+        mc.admin.command("ping")
         db = mc[DB_NAME]
-        db.command("listCollections")         # force auth on target DB
+        db.command("listCollections")  # force auth
 
-        # Indexes (idempotent)
+        # Indexes (idempotent). Text index is a fallback if Atlas Search index isn't set.
         db[DOCS_COLL].create_index(
             [("title","text"),("section","text"),("body","text")],
             name="kb_text_idx"
@@ -75,7 +74,7 @@ def get_clients():
         db[CHAT_COLL].create_index([("session_id", ASCENDING), ("ts", ASCENDING)], name="chat_session_ts")
         db[CHAT_COLL].create_index([("email", ASCENDING)], name="chat_email_idx")
 
-        # Optional seed so search works on first run
+        # Optional seed
         if db[DOCS_COLL].count_documents({}) == 0:
             db[DOCS_COLL].insert_one({
                 "source":"seed.md",
@@ -111,17 +110,48 @@ def save_msg(session_id: str, email: str, role: str, content: str) -> None:
     })
 
 def search_docs(query: str, k: int = 5, topic: Optional[str] = None) -> List[Dict]:
+    """
+    Prefer Atlas Search ($search). Fallback to Mongo text index ($text) if $search is unavailable.
+    """
     if docs is None: return []
-    match: Dict = {"$text": {"$search": query}}
-    if topic: match["topic"] = topic
-    pipeline = [
-        {"$match": match},
-        {"$addFields": {"score": {"$meta": "textScore"}}},
-        {"$sort": {"score": -1}},
-        {"$limit": int(k)},
-        {"$project": {"_id": 0, "source": 1, "title": 1, "section": 1, "body": 1, "score": 1}},
-    ]
-    return list(docs.aggregate(pipeline))
+    # Try Atlas Search first
+    try:
+        if topic:
+            pipeline = [
+                {"$search": {
+                    "index": "default",
+                    "compound": {
+                        "must": [{"text": {"query": query, "path": ["title","section","body"]}}],
+                        "filter": [{"equals": {"path": "topic", "value": topic}}]
+                    }
+                }},
+                {"$limit": int(k)},
+                {"$project": {"_id": 0, "source": 1, "title": 1, "section": 1, "body": 1,
+                              "score": {"$meta": "searchScore"}}}
+            ]
+        else:
+            pipeline = [
+                {"$search": {
+                    "index": "default",
+                    "text": {"query": query, "path": ["title","section","body"]}
+                }},
+                {"$limit": int(k)},
+                {"$project": {"_id": 0, "source": 1, "title": 1, "section": 1, "body": 1,
+                              "score": {"$meta": "searchScore"}}}
+            ]
+        return list(docs.aggregate(pipeline))
+    except Exception:
+        # Fallback to $text
+        match: Dict = {"$text": {"$search": query}}
+        if topic: match["topic"] = topic
+        pipeline = [
+            {"$match": match},
+            {"$addFields": {"score": {"$meta": "textScore"}}},
+            {"$sort": {"score": -1}},
+            {"$limit": int(k)},
+            {"$project": {"_id": 0, "source": 1, "title": 1, "section": 1, "body": 1, "score": 1}},
+        ]
+        return list(docs.aggregate(pipeline))
 
 def build_context(rows: List[Dict]) -> str:
     def trunc(s: str) -> str:
