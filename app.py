@@ -2,6 +2,7 @@ import os, uuid, datetime, re
 from typing import List, Dict, Optional
 import streamlit as st
 from pymongo import MongoClient, ASCENDING
+from pymongo.server_api import ServerApi
 from anthropic import Anthropic, APIStatusError
 import certifi
 
@@ -15,14 +16,16 @@ DB_NAME, DOCS_COLL, CHAT_COLL = "rag", "docs", "chat"
 MODEL = "claude-3-5-sonnet-latest"
 K_DEFAULT, MAX_BODY_CHARS = 5, 1200
 
-# ---- cached clients (deferred init + TLS CA + timeouts) ----
+# ---- cached clients (deferred init; TLS CA; longer timeouts) ----
 @st.cache_resource(show_spinner=False)
 def get_clients():
     anth = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+
     db = None
     if MONGO_URI:
         mc = MongoClient(
             MONGO_URI,
+            server_api=ServerApi("1"),
             tls=True,
             tlsCAFile=certifi.where(),
             serverSelectionTimeoutMS=15000,
@@ -49,8 +52,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def get_history(session_id: str, email: str, limit: int = 20) -> List[Dict]:
     if chat is None: return []
-    q = {"session_id": session_id, "email": email}
-    return list(chat.find(q).sort("ts", 1).limit(limit))
+    return list(chat.find({"session_id": session_id, "email": email}).sort("ts", 1).limit(limit))
 
 def save_msg(session_id: str, email: str, role: str, content: str) -> None:
     if chat is None: return
@@ -65,8 +67,7 @@ def save_msg(session_id: str, email: str, role: str, content: str) -> None:
 def search_docs(query: str, k: int = 5, topic: Optional[str] = None) -> List[Dict]:
     if docs is None: return []
     match: Dict = {"$text": {"$search": query}}
-    if topic:
-        match["topic"] = topic
+    if topic: match["topic"] = topic
     pipeline = [
         {"$match": match},
         {"$addFields": {"score": {"$meta": "textScore"}}},
@@ -83,8 +84,7 @@ def build_context(rows: List[Dict]) -> str:
     parts = []
     for i, r in enumerate(rows, 1):
         hdr = f"[Doc {i}] {r.get('title') or r.get('source')}"
-        if r.get("section"):
-            hdr += f" — {r['section']}"
+        if r.get("section"): hdr += f" — {r['section']}"
         parts.append(hdr + "\n" + trunc(r.get("body", "")))
     return "\n\n".join(parts)
 
@@ -102,8 +102,7 @@ def build_messages(history_rows: List[Dict], context: str, question: str) -> Lis
     return msgs
 
 def ask_claude(messages: List[Dict]) -> str:
-    if anth is None:
-        return "Anthropic key not configured."
+    if anth is None: return "Anthropic key not configured."
     system = (
         "You are an SEO coach. Use only the provided CONTEXT for facts. "
         "If context is weak, state what is missing. Return numbered, actionable steps. "
@@ -130,8 +129,7 @@ with st.sidebar:
     if not ANTHROPIC_API_KEY: st.warning("ANTHROPIC_API_KEY is not set. Answers are disabled.")
 
 # require email before continuing
-email_ok = bool(email) and EMAIL_RE.match(email) is not None
-if not email_ok:
+if not (email and EMAIL_RE.match(email)):
     st.info("Enter a valid email address to start.")
     st.stop()
 
@@ -143,8 +141,7 @@ for h in get_history(sid, email, limit=50):
 # ---- chat input ----
 user_msg = st.chat_input("Ask an SEO question…")
 if user_msg:
-    with st.chat_message("user"):
-        st.write(user_msg)
+    with st.chat_message("user"): st.write(user_msg)
     save_msg(sid, email, "user", user_msg)
 
     rows = search_docs(user_msg, k=k, topic=(topic or None))
