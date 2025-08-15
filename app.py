@@ -44,6 +44,8 @@ def _build_mongo_uri() -> Optional[str]:
 # -------- Clients --------
 @st.cache_resource(show_spinner=False)
 def get_clients():
+    from pymongo.errors import OperationFailure
+
     anth = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
     uri = _build_mongo_uri()
@@ -66,16 +68,27 @@ def get_clients():
         db = mc[DB_NAME]
         db.command("listCollections")  # force auth
 
-        # Indexes (idempotent). Text index is a fallback if Atlas Search index isn't set.
-        db[DOCS_COLL].create_index(
-            [("title","text"),("section","text"),("body","text")],
-            name="kb_text_idx"
-        )
-        db[CHAT_COLL].create_index([("session_id", ASCENDING), ("ts", ASCENDING)], name="chat_session_ts")
-        db[CHAT_COLL].create_index([("email", ASCENDING)], name="chat_email_idx")
+        # Indexes (idempotent). Ignore code 85 (IndexOptionsConflict).
+        try:
+            db[DOCS_COLL].create_index([("title","text"),("section","text"),("body","text")])
+        except OperationFailure as ex:
+            if getattr(ex, "code", None) != 85:
+                raise
+
+        try:
+            db[CHAT_COLL].create_index([("session_id", ASCENDING), ("ts", ASCENDING)])
+        except OperationFailure as ex:
+            if getattr(ex, "code", None) != 85:
+                raise
+
+        try:
+            db[CHAT_COLL].create_index([("email", ASCENDING)])
+        except OperationFailure as ex:
+            if getattr(ex, "code", None) != 85:
+                raise
 
         # Optional seed
-        if db[DOCS_COLL].count_documents({}) == 0:
+        if db[DOCS_COLL].estimated_document_count() == 0:
             db[DOCS_COLL].insert_one({
                 "source":"seed.md",
                 "title":"Seed",
@@ -93,6 +106,7 @@ def get_clients():
 anth, db = get_clients()
 docs = db[DOCS_COLL] if db is not None else None
 chat = db[CHAT_COLL] if db is not None else None
+
 
 # -------- Storage helpers --------
 def get_history(session_id: str, email: str, limit: int = 20) -> List[Dict]:
