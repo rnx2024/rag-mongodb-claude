@@ -61,13 +61,29 @@ def get_clients():
             socketTimeoutMS=15000,
             appname="seo-coach",
         )
-        mc.admin.command("ping")          # network
+        mc.admin.command("ping")              # network
         db = mc[DB_NAME]
-        db.command("listCollections")     # force auth on target DB
+        db.command("listCollections")         # force auth on target DB
+
         # Indexes (idempotent)
-        db[DOCS_COLL].create_index([("title","text"),("section","text"),("body","text")], name="kb_text_idx")
+        db[DOCS_COLL].create_index(
+            [("title","text"),("section","text"),("body","text")],
+            name="kb_text_idx"
+        )
         db[CHAT_COLL].create_index([("session_id", ASCENDING), ("ts", ASCENDING)], name="chat_session_ts")
         db[CHAT_COLL].create_index([("email", ASCENDING)], name="chat_email_idx")
+
+        # Optional seed so search works on first run
+        if db[DOCS_COLL].count_documents({}) == 0:
+            db[DOCS_COLL].insert_one({
+                "source":"seed.md",
+                "title":"Seed",
+                "section":"Init",
+                "body":"Seed doc",
+                "topic":"SEO",
+                "updated_at": datetime.datetime.utcnow()
+            })
+
         return anth, db
     except Exception as e:
         st.error(f"Mongo connection failed: {e}")
