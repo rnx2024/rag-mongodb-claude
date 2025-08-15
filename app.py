@@ -1,11 +1,11 @@
-import os, uuid, datetime
+import os, uuid, datetime, re
 from typing import List, Dict, Optional
 import streamlit as st
 from pymongo import MongoClient, ASCENDING
 from anthropic import Anthropic, APIStatusError
 import certifi
 
-st.set_page_config(page_title="SEO Coach (Claude + MongoDB)", page_icon="🔍")
+st.set_page_config(page_title="SEO Coach", page_icon="🔍")
 st.title("SEO Coach")
 
 # ---- config / secrets ----
@@ -15,31 +15,27 @@ DB_NAME, DOCS_COLL, CHAT_COLL = "rag", "docs", "chat"
 MODEL = "claude-3-5-sonnet-latest"
 K_DEFAULT, MAX_BODY_CHARS = 5, 1200
 
-# ---- cached clients (deferred init + TLS CA + longer timeouts) ----
+# ---- cached clients (deferred init + TLS CA + timeouts) ----
 @st.cache_resource(show_spinner=False)
 def get_clients():
     anth = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
-
     db = None
     if MONGO_URI:
         mc = MongoClient(
             MONGO_URI,
             tls=True,
             tlsCAFile=certifi.where(),
-            serverSelectionTimeoutMS=8000,
-            connectTimeoutMS=8000,
-            socketTimeoutMS=8000,
+            serverSelectionTimeoutMS=15000,
+            connectTimeoutMS=15000,
+            socketTimeoutMS=15000,
             appname="seo-coach",
         )
         try:
-            mc.admin.command("ping")  # fail fast if IP not allowlisted
+            mc.admin.command("ping")
             db = mc[DB_NAME]
-            # ensure indexes (idempotent)
-            db[DOCS_COLL].create_index(
-                [("title", "text"), ("section", "text"), ("body", "text")],
-                name="kb_text_idx"
-            )
+            db[DOCS_COLL].create_index([("title", "text"), ("section", "text"), ("body", "text")], name="kb_text_idx")
             db[CHAT_COLL].create_index([("session_id", ASCENDING), ("ts", ASCENDING)], name="chat_session_ts")
+            db[CHAT_COLL].create_index([("email", ASCENDING)], name="chat_email_idx")
         except Exception as e:
             st.warning(f"MongoDB not reachable: {e}")
     return anth, db
@@ -49,13 +45,22 @@ docs = db[DOCS_COLL] if db is not None else None
 chat = db[CHAT_COLL] if db is not None else None
 
 # ---- helpers ----
-def get_history(session_id: str, limit: int = 20) -> List[Dict]:
-    if chat is None: return []
-    return list(chat.find({"session_id": session_id}).sort("ts", 1).limit(limit))
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-def save_msg(session_id: str, role: str, content: str) -> None:
+def get_history(session_id: str, email: str, limit: int = 20) -> List[Dict]:
+    if chat is None: return []
+    q = {"session_id": session_id, "email": email}
+    return list(chat.find(q).sort("ts", 1).limit(limit))
+
+def save_msg(session_id: str, email: str, role: str, content: str) -> None:
     if chat is None: return
-    chat.insert_one({"session_id": session_id, "ts": datetime.datetime.utcnow(), "role": role, "content": content})
+    chat.insert_one({
+        "session_id": session_id,
+        "email": email,
+        "ts": datetime.datetime.utcnow(),
+        "role": role,
+        "content": content
+    })
 
 def search_docs(query: str, k: int = 5, topic: Optional[str] = None) -> List[Dict]:
     if docs is None: return []
@@ -112,9 +117,11 @@ def ask_claude(messages: List[Dict]) -> str:
     except Exception as e:
         return f"Claude call failed: {e}"
 
-# ---- sidebar / session ----
+# ---- sidebar / session + email gate ----
 with st.sidebar:
     st.markdown("**Session**")
+    email = st.text_input("Email address", value=st.session_state.get("email", ""))
+    st.session_state["email"] = email
     sid = st.text_input("session_id", value=st.session_state.get("sid") or str(uuid.uuid4()))
     st.session_state["sid"] = sid
     k = st.number_input("Top-K docs", min_value=1, max_value=10, value=K_DEFAULT, step=1)
@@ -122,8 +129,14 @@ with st.sidebar:
     if not MONGO_URI: st.warning("MONGO_URI is not set. KB and chat history are disabled.")
     if not ANTHROPIC_API_KEY: st.warning("ANTHROPIC_API_KEY is not set. Answers are disabled.")
 
+# require email before continuing
+email_ok = bool(email) and EMAIL_RE.match(email) is not None
+if not email_ok:
+    st.info("Enter a valid email address to start.")
+    st.stop()
+
 # ---- history ----
-for h in get_history(sid, limit=50):
+for h in get_history(sid, email, limit=50):
     with st.chat_message("assistant" if h.get("role") == "assistant" else "user"):
         st.write(h.get("content", ""))
 
@@ -132,11 +145,11 @@ user_msg = st.chat_input("Ask an SEO question…")
 if user_msg:
     with st.chat_message("user"):
         st.write(user_msg)
-    save_msg(sid, "user", user_msg)
+    save_msg(sid, email, "user", user_msg)
 
     rows = search_docs(user_msg, k=k, topic=(topic or None))
     context = build_context(rows)
-    reply = ask_claude(build_messages(get_history(sid, limit=20), context, user_msg))
+    reply = ask_claude(build_messages(get_history(sid, email, limit=20), context, user_msg))
 
     with st.chat_message("assistant"):
         st.write(reply)
@@ -144,4 +157,4 @@ if user_msg:
             st.caption("Sources: " + ", ".join(
                 f"{r.get('source')}{' • '+r.get('section') if r.get('section') else ''}" for r in rows
             ))
-    save_msg(sid, "assistant", reply)
+    save_msg(sid, email, "assistant", reply)
