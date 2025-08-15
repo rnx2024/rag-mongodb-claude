@@ -1,5 +1,6 @@
-# Python 3.9+
-streamlit>=1.32,<2
-pymongo>=4.5,<5
-anthropic>=0.31,<1
-python-dotenv>=1.0,<2
+streamlit
+pymongo
+dnspython
+certifi
+anthropic
+python-dotenv
