@@ -36,6 +36,23 @@ DB_NAME, DOCS_COLL, CHAT_COLL = MONGO_DB, "docs", "chat"
 MODEL = "claude-3-5-sonnet-latest"
 K_DEFAULT, MAX_BODY_CHARS = 5, 1200
 
+# 1) Raw TLS handshake to one shard host
+import socket, ssl, certifi
+host = "ac-ocnld0l-shard-00-00.bo4mikx.mongodb.net"
+ctx = ssl.create_default_context(cafile=certifi.where())
+s = socket.create_connection((host, 27017), timeout=10)
+ss = ctx.wrap_socket(s, server_hostname=host)
+print("TLS OK:", ss.version()); ss.close()
+
+# 2) Force real auth on DB after fixing allowlist/URI
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
+mc = MongoClient(os.environ["MONGO_URI"], server_api=ServerApi("1"),
+                 tls=True, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=15000)
+print(mc.admin.command("ping"))
+print(mc["rag"].list_collection_names())
+
+
 # ---- cached clients (deferred init; TLS CA; early auth) ----
 @st.cache_resource(show_spinner=False)
 def get_clients():
