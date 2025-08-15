@@ -11,7 +11,6 @@ st.set_page_config(page_title="SEO Coach", page_icon="🔍")
 st.title("SEO Coach")
 
 # -------- Secrets / Config (Mongo via driver only) --------
-# Mongo: keep credentials only in st.secrets
 MONGO_URI = st.secrets.get("MONGO_URI")  # optional full SRV URI
 MONGO_USER = st.secrets.get("MONGO_USER")
 MONGO_PASSWORD = st.secrets.get("MONGO_PASSWORD")
@@ -34,10 +33,13 @@ def _build_mongo_uri() -> Optional[str]:
     if MONGO_USER and MONGO_PASSWORD:
         user = quote_plus(MONGO_USER)
         pwd = quote_plus(MONGO_PASSWORD)
-        uri = f"mongodb+srv://{user}:{pwd}@{MONGO_HOST}/{MONGO_DB}?retryWrites=true&w=majority&appName={MONGO_APPNAME}"
-        if MONGO_AUTH_SOURCE:
-            uri += f"&authSource={quote_plus(MONGO_AUTH_SOURCE)}"
-        return uri
+        base = f"mongodb+srv://{user}:{pwd}@{MONGO_HOST}"
+        qs = f"retryWrites=true&w=majority&appName={MONGO_APPNAME}"
+        # Default to admin authSource unless explicitly set
+        auth_src = quote_plus(MONGO_AUTH_SOURCE or "admin")
+        if MONGO_DB:
+            return f"{base}/{MONGO_DB}?{qs}&authSource={auth_src}"
+        return f"{base}/?{qs}&authSource={auth_src}"
     return None
 
 # -------- Clients --------
@@ -192,4 +194,11 @@ if user_msg:
     save_msg(sid, email, "user", user_msg)
     rows = search_docs(user_msg, k=k, topic=(topic or None))
     context = build_context(rows)
-    r
+    reply = ask_claude(build_messages(get_history(sid, email, limit=20), context, user_msg))
+    with st.chat_message("assistant"):
+        st.write(reply)
+        if rows:
+            st.caption("Sources: " + ", ".join(
+                f"{r.get('source')}{' • '+r.get('section') if r.get('section') else ''}" for r in rows
+            ))
+    save_msg(sid, email, "assistant", reply)
